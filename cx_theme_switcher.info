@@ -1,0 +1,4 @@
+name = Context Theme Switcher
+description = Provides lightweight interface for setting menu trails to activate new themes
+package = Context
+core = 6.x

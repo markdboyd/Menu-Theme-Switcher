@@ -1,0 +1,215 @@
+<?php
+
+	/**
+	 * Implementation of hook_menu()
+	 */
+	function cx_theme_switcher_menu() {
+		$items = array();
+	
+		$items['admin/build/themes/switch'] = array(
+			'title' => 'Theme Switching',
+			'description' => 'Allow active theme to be switched based on menu conditions.',
+			'page callback' => 'drupal_get_form',
+			'page arguments' => array('cx_theme_switcher_settings_form', NULL),
+			'access arguments' => array('administer site configuration')
+		);
+
+		return $items;
+	}
+
+	/**
+	 * Implementation of hook_init()
+	 */
+	function cx_theme_switcher_init(){		
+		$item = menu_get_item(); 
+	
+		if(module_exists('menutrails')){
+			$object = menu_get_object();
+			if($object->nid && $object->path == substr(url($_GET['q']), 1)){
+				$node_trails = variable_get('menutrails_node_types', array());
+				$term_trails = variable_get('menutrails_terms', array());		
+				if(!empty($node_trails[$object->type])){
+					$item = menutrails_node_location($object);
+				}
+				if (!empty($object->taxonomy)) {
+					foreach ($object->taxonomy as $term) {
+						if (!empty($term_trails[$term->tid])) {
+						  $item = menutrails_node_location($object);
+						}
+					}
+				}
+			}
+		}
+
+		cx_theme_switcher_check_active_conditions($item);
+	}
+
+
+	/**
+	 * Implementation of preprocess_page().
+	 */
+	function cx_theme_switcher_preprocess_page(&$vars) {
+		global $custom_theme;
+
+		$vars['body_classes'] .= !empty($custom_theme) ? ' ' . $custom_theme : '';
+	}
+
+	/**
+	 * Custom function to determine whether we need to switch themes
+	 * (e.g. to change from main theme to PIER)
+	 */
+	function cx_theme_switcher_check_active_conditions($item){
+
+		//
+		// Check if our request is being done through ajax.
+		// If so, just return -- otherwise the 'theme information' option
+		// in views won't respect the proper templates
+		//
+		if (strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) == 'xmlhttprequest' ) {
+			return;
+		}
+
+		if ( !isset($item['href']) || !$item['href'] ) {
+			//trigger_error( t('Invalid item href for item: !item', array('!item' => print_r($item,1)) ), E_USER_ERROR);
+			return false;
+		}
+
+		global $custom_theme;
+	
+		$theme_switcher_settings = variable_get('cx_theme_switcher_settings', null);
+
+		$current_mlids = array();
+		$current_plids = array();
+	
+		$get_menu_object = db_query('SELECT * FROM {menu_links} WHERE link_path = "%s"', $item['href']);
+	
+		while($menu_object = db_fetch_object($get_menu_object)){
+			$current_mlids[] = $menu_object->mlid;
+			$current_plids = cx_theme_switcher_build_current_plids($menu_object);
+		}
+	
+		if(!empty($theme_switcher_settings)){
+			foreach($theme_switcher_settings as $idx => $settings){
+				$menu_trigger = $settings['menu_trigger'];		
+				$menu_triggers_parts = explode(':', $menu_trigger);		
+		
+				$menu_trigger_mlid = $menu_triggers_parts[1];	
+		
+				if(in_array($menu_trigger_mlid, $current_mlids) || ($settings['include_children'] && in_array($menu_trigger_mlid, $current_plids))){
+					$custom_theme = $settings['theme_reaction'];
+				}
+			}
+		}
+		
+		if( !empty($custom_theme) ){
+			init_theme();	
+		}	
+	}
+
+	/**
+	 * Iterate through the menu parent columns to find all of our relevant menu parents
+	 * Used to determine which theme to display
+	 */
+	function cx_theme_switcher_build_current_plids($menu_object){
+		$plids = array();
+		$get_columns = db_query('SHOW columns FROM {menu_links} WHERE Field LIKE "p%"');
+	
+		while($column = db_fetch_object($get_columns)){
+			$field_name = $column->Field;
+			if(preg_match('/^p[0-9]+$/', $field_name)){
+				if($menu_object->$field_name){
+					$plids[] = $menu_object->$field_name;
+				}
+			}
+		}
+	
+		return $plids;
+	}
+	
+	/**
+	 * Theme Switcher settings form
+	 * @ingroup forms
+	 * @see system_themes_form_submit()
+	 */
+	function cx_theme_switcher_settings_form(){
+		$menu_options = array_merge(array('0' => 'None'), menu_parent_options(menu_get_menus(), 0));
+		
+		$active_themes = array( '0' => 'None' );
+		foreach(list_themes() as $name => $theme){
+			if($theme->status){
+				$active_themes[$name] = $name;
+			}
+		}
+		
+		$theme_switcher_settings = variable_get('cx_theme_switcher_settings', null);
+		
+		$theme_settings_count = 1;
+		if( isset($theme_switcher_settings) && !empty($theme_switcher_settings) ){
+			$theme_settings_count = count($theme_switcher_settings) + 1;
+		}
+		
+		for( $i = 0; $i < $theme_settings_count; $i++ ){
+			$settings = $theme_switcher_settings[$i];
+			
+			$form['theme_switcher_settings_' . $i] = array(
+				'#type' => 'fieldset',
+				'#weight' => $i,
+				'#title' => t('Theme Switcher Settings Group !theme_settings_count', array( '!theme_settings_count' => $i + 1)),
+				'#collapsible' => FALSE
+			);
+		
+			$form['theme_switcher_settings_' . $i]['menu_trigger_' . $i] = array(
+				'#type' => 'select',
+				'#options' => $menu_options,
+				'#default_value' => $settings['menu_trigger'] ? $settings['menu_trigger'] : 0,
+				'#title' => t('Menu Item Condition')
+			);			
+		
+			$form['theme_switcher_settings_' . $i]['include_children_' . $i] = array(
+				'#type' => 'checkbox',
+				'#default_value' => $settings['include_children'] ? $settings['include_children'] : 0,
+				'#title' => t('Include children of this menu item?')
+			);
+		
+			$form['theme_switcher_settings_' . $i]['theme_reaction_' . $i] = array(
+				'#type' => 'select',
+				'#options' => $active_themes,
+				'#default_value' => $settings['theme_reaction'] ? $settings['theme_reaction'] : 0,
+				'#title' => t('Active Theme Reaction')
+			);					
+		
+		}
+		
+		$form['theme_switcher_settings_count'] = array(
+			'#type' => 'hidden',
+			'#default_value' => $theme_settings_count
+		);
+		
+		$form = system_settings_form($form);
+	
+		$form['#submit'][] = 'cx_theme_switcher_settings_form_submit';
+
+		return $form;
+	}
+
+	/**
+	 * Process theme switcher settings form submissions.
+	 */
+	function cx_theme_switcher_settings_form_submit($form, &$form_state) {
+		$theme_switcher_settings = array();
+
+		for( $i = 0; $i < $form_state['values']['theme_switcher_settings_count']; $i++ ){
+			if($form_state['values']['menu_trigger_' . $i]){
+				$theme_switcher_settings[$i]['menu_trigger'] = $form_state['values']['menu_trigger_' . $i];
+			}
+			if($form_state['values']['theme_reaction_' . $i]){
+				$theme_switcher_settings[$i]['theme_reaction'] = $form_state['values']['theme_reaction_' . $i];
+			}
+			if($form_state['values']['include_children_' . $i]){
+				$theme_switcher_settings[$i]['include_children'] = $form_state['values']['include_children_' . $i];
+			}    	
+		}
+			
+		variable_set('cx_theme_switcher_settings', $theme_switcher_settings);    
+	}	
+	
